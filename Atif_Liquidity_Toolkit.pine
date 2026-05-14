@@ -1,0 +1,818 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © benscyeung
+
+//@version=6
+indicator("Atif's Liquidity Toolkit [Swing Trading]", shorttitle="ALT - Atif's Toolkit", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ATIF'S LIQUIDITY TOOLKIT - PINE SCRIPT v6
+// Based on Atif Hussain's swing trading principles (@AtifHussainOG)
+//
+// WHAT IS THIS?
+//   This indicator helps you find high-probability swing trade setups using
+//   three proven models. It shows you WHERE price is likely to reverse and
+//   WHEN to enter the trade.
+//
+// MODEL A: Liquidity Sweep + Fair Value Gap (FVG)
+//   - "Smart Money" hunts stop-losses above/below key levels, then reverses
+//   - We wait for this "sweep" (fakeout), then enter when an FVG forms
+//   - Think of it as: Institutions push price to grab liquidity, then reverse
+//
+// MODEL B: Trend + Optimal Trade Entry (OTE) Fibonacci
+//   - In a strong trend, price pulls back to a "discount" zone (61.8%-78.6%)
+//   - We enter when price touches this OTE zone, riding the trend continuation
+//   - Think of it as: Buying a pullback in an uptrend, selling a bounce in a downtrend
+//
+// MODEL C: HTF FVG + LTF FVG Entry (Pure FVG Confluence)
+//   - No sweeps, no bias, no order blocks — purely FVGs
+//   - 4H FVG = directional anchor (bullish or bearish)
+//   - Enter on the first LTF FVG that forms while price is inside the 4H FVG
+//   - Think of it as: The HTF FVG is a magnet; the LTF FVG confirms it will hold
+//
+// KEY CONCEPTS FOR BEGINNERS:
+//   - LIQUIDITY POOL = Where retail traders place stop-losses (swing highs/lows)
+//   - SWEEP = Price briefly breaks the pool, grabbing those stops, then reverses
+//   - FVG = A gap in price action showing institutional buying/selling pressure
+//   - iFVG = Inverted FVG — price fills the gap but leaves a new gap behind
+//   - OTE = The "sweet spot" Fibonacci zone for entering a trending move
+//   - HTF BIAS = The bigger picture trend (we only trade WITH it, not against it)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ──────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Model Selection
+modelAMode = input.bool(true, "Enable Model A: Liquidity Sweep + FVG", group="=== MODEL SELECTION ===", tooltip="Sweeps = Smart Money hunting stops. Enable this to see sweep setups.")
+modelBMode = input.bool(true, "Enable Model B: Trend + OTE Fibonacci", group="=== MODEL SELECTION ===", tooltip="OTE = Optimal Trade Entry. Enable this to see Fibonacci pullback entries.")
+modelCMode = input.bool(true, "Enable Model C: HTF FVG + LTF FVG Entry", group="=== MODEL SELECTION ===", tooltip="Pure FVG confluence. 4H FVG = anchor. LTF FVG = entry. No sweeps, no bias.")
+
+// Higher Timeframe Settings
+htfTimeframe = input.timeframe("240", "Higher Timeframe for Bias", group="=== HIGHER TIMEFRAME BIAS ===", tooltip="Default 4H. The indicator checks this higher timeframe to determine if we should be looking for BUY or SELL setups. Only trade in the direction of this bias.")
+useHTFBias = input.bool(true, "Use HTF Bias Filter", group="=== HIGHER TIMEFRAME BIAS ===", tooltip="If ON: Only shows signals that align with the higher timeframe trend. If OFF: Shows all signals (less filtered).")
+
+// Model C Settings
+modelCHTFFrame = input.timeframe("240", "Model C HTF Anchor (FVG)", group="=== MODEL C: HTF FVG + LTF FVG ===", tooltip="The higher timeframe that provides the directional FVG anchor. Default 4H.")
+modelCLTFFrame = input.timeframe("15", "Model C LTF Entry (FVG)", group="=== MODEL C: HTF FVG + LTF FVG ===", tooltip="The lower timeframe for entry FVG detection. Default 15m. Can use 5m, 3m, 1m for more setups.")
+showHTFFVG = input.bool(true, "Show HTF FVG Boxes", group="=== MODEL C: HTF FVG + LTF FVG ===", tooltip="Highlight the 4H FVG zones on your current chart.")
+showLTFFVG = input.bool(true, "Show LTF FVG Boxes", group="=== MODEL C: HTF FVG + LTF FVG ===", tooltip="Highlight the lower timeframe FVGs on your current chart.")
+showModelCArrows = input.bool(true, "Show Model C Signal Arrows", group="=== MODEL C: HTF FVG + LTF FVG ===", tooltip="Show BUY/SELL arrows when HTF FVG + LTF FVG align.")
+
+// Liquidity Pool Settings
+pivotLookback = input.int(5, "Pivot Lookback (bars)", minval=2, maxval=50, group="=== LIQUIDITY POOLS ===", tooltip="How many bars to look back for swing highs/lows. Lower = more pools, more noise. Higher = fewer pools, cleaner setups.")
+showBuysidePools = input.bool(true, "Show Buyside Liquidity Pools", group="=== LIQUIDITY POOLS ===", tooltip="BLUE dashed lines = Swing highs where retail traders have stop-losses. Price often sweeps above these before reversing down.")
+showSellsidePools = input.bool(true, "Show Sellside Liquidity Pools", group="=== LIQUIDITY POOLS ===", tooltip="RED dashed lines = Swing lows where retail traders have stop-losses. Price often sweeps below these before reversing up.")
+poolLineWidth = input.int(2, "Pool Line Width", minval=1, maxval=4, group="=== LIQUIDITY POOLS ===")
+
+// Sweep Settings
+sweepConfirmationBars = input.int(2, "Sweep Confirmation (bars)", minval=1, maxval=10, group="=== SWEEP DETECTION ===", tooltip="How many bars price must stay beyond the pool to confirm a sweep.")
+minSweepWickPercent = input.float(0.3, "Min Wick % for Sweep", minval=0.1, maxval=1.0, step=0.1, group="=== SWEEP DETECTION ===", tooltip="The wick beyond the pool must be at least this % of the candle body. Filters out tiny fake wicks.")
+showSweepLabels = input.bool(true, "Show Sweep Labels", group="=== SWEEP DETECTION ===", tooltip="Shows 'BSS' (Buyside Sweep) or 'SSS' (Sellside Sweep) labels when a sweep occurs.")
+
+// FVG Settings
+fvgMinGap = input.float(0.0, "Min FVG Gap (ticks, 0=any)", minval=0, step=0.01, group="=== FAIR VALUE GAPS ===", tooltip="Minimum gap size for an FVG to be valid. 0 = any gap counts.")
+showBullishFVG = input.bool(true, "Show Bullish FVGs", group="=== FAIR VALUE GAPS ===", tooltip="TEAL boxes = Bullish Fair Value Gaps. These are gaps UP in price showing strong buying pressure. Enter long when price returns to these zones.")
+showBearishFVG = input.bool(true, "Show Bearish FVGs", group="=== FAIR VALUE GAPS ===", tooltip="MAROON boxes = Bearish Fair Value Gaps. These are gaps DOWN in price showing strong selling pressure. Enter short when price returns to these zones.")
+fvgExtendBars = input.int(20, "FVG Extend (bars)", minval=5, maxval=100, group="=== FAIR VALUE GAPS ===", tooltip="How far forward to extend the FVG box on the chart.")
+showFVGLabels = input.bool(true, "Show FVG Labels on Boxes", group="=== FAIR VALUE GAPS ===", tooltip="Show 'FVG' text label inside each FVG box so you know what it is.")
+showiFVG = input.bool(true, "Show Inverted FVGs (iFVG)", group="=== FAIR VALUE GAPS ===", tooltip="iFVG = price fills an old FVG but leaves a new gap. These are continuation signals.")
+
+// OTE Fibonacci Settings
+fibLookback = input.int(50, "Fib Lookback (bars)", minval=10, maxval=200, group="=== OTE FIBONACCI ===", tooltip="How far back to look for the swing high/low to calculate Fibonacci levels.")
+showFibLevels = input.bool(true, "Show Fibonacci Levels", group="=== OTE FIBONACCI ===", tooltip="Shows 38.2%, 50%, 61.8%, and 78.6% Fibonacci retracement levels.")
+showFibLabels = input.bool(false, "Show Fibonacci Labels", group="=== OTE FIBONACCI ===", tooltip="Labels can be noisy. OFF by default. Turn on if you want text labels next to each Fib level.")
+fibOTEZoneLow = input.float(0.618, "OTE Zone Low (Fib)", minval=0.1, maxval=0.9, step=0.001, group="=== OTE FIBONACCI ===", tooltip="Bottom of the OTE zone. Default 61.8% = the 'golden ratio'.")
+fibOTEZoneHigh = input.float(0.786, "OTE Zone High (Fib)", minval=0.1, maxval=0.9, step=0.001, group="=== OTE FIBONACCI ===", tooltip="Top of the OTE zone. Default 78.6% = deep discount entry.")
+showOTEZone = input.bool(true, "Highlight OTE Zone", group="=== OTE FIBONACCI ===", tooltip="ORANGE highlighted area = the OTE zone where we look for entries in a trending market.")
+
+// Trend Detection Settings
+trendEMAPeriod = input.int(50, "Trend EMA Period", minval=10, maxval=200, group="=== TREND DETECTION ===", tooltip="Price above this EMA = uptrend. Below = downtrend.")
+useSwingStructure = input.bool(true, "Use Swing High/Low Structure", group="=== TREND DETECTION ===", tooltip="Uses swing highs/lows to confirm trend direction.")
+
+// Signal Settings
+showBuySellSignals = input.bool(true, "Show Buy/Sell Signal Arrows", group="=== SIGNALS ===", tooltip="GREEN triangle below bar = BUY. RED triangle above bar = SELL.")
+signalTextSize = input.string("normal", "Signal Text Size", options=["tiny", "small", "normal", "large"], group="=== SIGNALS ===")
+signalArrowSize = input.string("normal", "Signal Arrow Size", options=["tiny", "small", "normal", "large"], group="=== SIGNALS ===")
+
+// Alert Settings
+alertOnSweep = input.bool(true, "Alert on Sweep", group="=== ALERTS ===")
+alertOnFVG = input.bool(true, "Alert on FVG", group="=== ALERTS ===")
+alertOnOTE = input.bool(true, "Alert on OTE Touch", group="=== ALERTS ===")
+alertOnBuySignal = input.bool(true, "Alert on BUY Signal", group="=== ALERTS ===")
+alertOnSellSignal = input.bool(true, "Alert on SELL Signal", group="=== ALERTS ===")
+alertOnModelC = input.bool(true, "Alert on Model C Signal", group="=== ALERTS ===", tooltip="Alert when HTF FVG + LTF FVG align for Model C.")
+
+// ──────────────────────────────────────────────────────────────────────────────
+// COLORS
+// ──────────────────────────────────────────────────────────────────────────────
+
+var color c_buysidePool = color.new(color.blue, 70)
+var color c_sellsidePool = color.new(color.red, 70)
+var color c_sweepBullish = color.new(color.green, 0)
+var color c_sweepBearish = color.new(color.red, 0)
+var color c_fvgBullish = color.new(color.teal, 80)
+var color c_fvgBearish = color.new(color.maroon, 80)
+var color c_oteZone = color.new(color.orange, 85)
+var color c_fib0 = color.new(color.gray, 0)
+var color c_fib382 = color.new(color.yellow, 0)
+var color c_fib500 = color.new(color.orange, 0)
+var color c_fib618 = color.new(color.green, 0)
+var color c_fib786 = color.new(color.blue, 0)
+var color c_fib1000 = color.new(color.gray, 0)
+
+// Model C colors
+var color c_htfFvgBullish = color.new(color.aqua, 70)
+var color c_htfFvgBearish = color.new(color.fuchsia, 70)
+var color c_ltfFvgBullish = color.new(color.lime, 60)
+var color c_ltfFvgBearish = color.new(color.purple, 60)
+
+// iFVG colors
+var color c_iFvgBullish = color.new(color.teal, 40)
+var color c_iFvgBearish = color.new(color.maroon, 40)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HIGHER TIMEFRAME BIAS
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Get HTF data - we look at a higher timeframe to know if we should be
+// looking for BUY setups or SELL setups. This keeps us trading WITH the trend.
+[htfHigh, htfLow, htfClose] = request.security(syminfo.tickerid, htfTimeframe, [high, low, close], lookahead=barmerge.lookahead_on)
+
+// HTF Trend using swing structure
+htfSwingHigh = ta.pivothigh(htfHigh, pivotLookback, pivotLookback)
+htfSwingLow = ta.pivotlow(htfLow, pivotLookback, pivotLookback)
+
+var float htfLastSwingHigh = na
+var float htfLastSwingLow = na
+
+if not na(htfSwingHigh)
+    htfLastSwingHigh := htfSwingHigh
+if not na(htfSwingLow)
+    htfLastSwingLow := htfSwingLow
+
+// HTF Bias: Bullish if higher highs and higher lows, Bearish if lower highs and lower lows
+htfBullish = not na(htfLastSwingHigh) and not na(htfLastSwingLow) and htfClose > htfLastSwingLow
+htfBearish = not na(htfLastSwingHigh) and not na(htfLastSwingLow) and htfClose < htfLastSwingHigh
+
+// EMA trend confirmation
+emaTrend = ta.ema(close, trendEMAPeriod)
+trendBullish = close > emaTrend
+trendBearish = close < emaTrend
+
+// Combined bias - BOTH HTF and current timeframe must agree
+bullishBias = (useHTFBias ? htfBullish : true) and trendBullish
+bearishBias = (useHTFBias ? htfBearish : true) and trendBearish
+
+// ──────────────────────────────────────────────────────────────────────────────
+// LIQUIDITY POOL DETECTION
+// ──────────────────────────────────────────────────────────────────────────────
+
+// LIQUIDITY POOLS = Where retail traders place their stop-losses.
+// Smart Money (institutions) knows these levels and often pushes price
+// to them to grab liquidity before reversing.
+//
+// BLUE dashed line = Buyside pool (swing high) - stops of short sellers
+// RED dashed line = Sellside pool (swing low) - stops of long buyers
+
+swingHigh = ta.pivothigh(high, pivotLookback, pivotLookback)
+swingLow = ta.pivotlow(low, pivotLookback, pivotLookback)
+
+var line[] buysideLines = array.new_line(0)
+var line[] sellsideLines = array.new_line(0)
+
+// Draw Buyside Liquidity Pools (swing highs) — ONLY when Model A is enabled
+if modelAMode and showBuysidePools and not na(swingHigh)
+    newLine = line.new(bar_index[pivotLookback], swingHigh, bar_index, swingHigh, color=c_buysidePool, width=poolLineWidth, style=line.style_dashed)
+    array.push(buysideLines, newLine)
+
+    // Limit number of lines
+    if array.size(buysideLines) > 20
+        line.delete(array.shift(buysideLines))
+
+// Draw Sellside Liquidity Pools (swing lows) — ONLY when Model A is enabled
+if modelAMode and showSellsidePools and not na(swingLow)
+    newLine = line.new(bar_index[pivotLookback], swingLow, bar_index, swingLow, color=c_sellsidePool, width=poolLineWidth, style=line.style_dashed)
+    array.push(sellsideLines, newLine)
+
+    if array.size(sellsideLines) > 20
+        line.delete(array.shift(sellsideLines))
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SWEEP DETECTION (MODEL A)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// A SWEEP is when price briefly breaks beyond a liquidity pool,
+// grabs the stop-losses sitting there, then closes back inside.
+// This is the "fakeout" that traps retail traders.
+//
+// Buyside Sweep (BSS): Price wicks ABOVE swing high, closes BELOW it
+//   → Smart Money sold into the breakout, expect reversal DOWN
+//
+// Sellside Sweep (SSS): Price wicks BELOW swing low, closes ABOVE it
+//   → Smart Money bought the breakdown, expect reversal UP
+
+// Track recent swing levels
+var float recentSwingHigh = na
+var float recentSwingLow = na
+var int recentSwingHighBar = na
+var int recentSwingLowBar = na
+
+if not na(swingHigh)
+    recentSwingHigh := swingHigh
+    recentSwingHighBar := bar_index[pivotLookback]
+
+if not na(swingLow)
+    recentSwingLow := swingLow
+    recentSwingLowBar := bar_index[pivotLookback]
+
+// Buyside Sweep: Price wicks above swing high but closes below it
+// NOTE: We detect sweeps regardless of bias. The signal logic later checks
+// if the sweep direction aligns with the current bias.
+isBuysideSweep = false
+if modelAMode and not na(recentSwingHigh)
+    wickAbove = high > recentSwingHigh
+    closeBelow = close < recentSwingHigh
+    wickSize = high - math.max(open, close)
+    bodySize = math.abs(close - open)
+    significantWick = wickSize > (bodySize * minSweepWickPercent) or bodySize == 0
+    isBuysideSweep := wickAbove and closeBelow and significantWick
+
+// Sellside Sweep: Price wicks below swing low but closes above it
+// NOTE: We detect sweeps regardless of bias. The signal logic later checks
+// if the sweep direction aligns with the current bias.
+isSellsideSweep = false
+if modelAMode and not na(recentSwingLow)
+    wickBelow = low < recentSwingLow
+    closeAbove = close > recentSwingLow
+    wickSize = math.min(open, close) - low
+    bodySize = math.abs(close - open)
+    significantWick = wickSize > (bodySize * minSweepWickPercent) or bodySize == 0
+    isSellsideSweep := wickBelow and closeAbove and significantWick
+
+// Draw sweep labels
+if isBuysideSweep and showSweepLabels
+    label.new(bar_index, high, "Liquidity Sweep\n(Buyside)", color=c_sweepBearish, textcolor=color.white, size=size.small, style=label.style_label_down)
+    if alertOnSweep
+        alert("Buyside Liquidity Sweep detected! Price faked above resistance - potential SELL setup forming.", alert.freq_once_per_bar_close)
+
+if isSellsideSweep and showSweepLabels
+    label.new(bar_index, low, "Liquidity Sweep\n(Sellside)", color=c_sweepBullish, textcolor=color.white, size=size.small, style=label.style_label_up)
+    if alertOnSweep
+        alert("Sellside Liquidity Sweep detected! Price faked below support - potential BUY setup forming.", alert.freq_once_per_bar_close)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FAIR VALUE GAP (FVG) DETECTION (MODEL A)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// FAIR VALUE GAPS = Imbalances in price action showing where
+// institutions aggressively bought or sold, leaving a "gap".
+// Price often returns to fill these gaps before continuing.
+//
+// Bullish FVG (TEAL box): Candle 1 high < Candle 3 low
+//   → Gap UP showing strong buying. Enter long if price returns to this zone.
+//
+// Bearish FVG (MAROON box): Candle 1 low > Candle 3 high
+//   → Gap DOWN showing strong selling. Enter short if price returns to this zone.
+
+bullishFVG = false
+bearishFVG = false
+
+if modelAMode
+    // Bullish FVG: 3 candles ago high < current low
+    bullishFVG := high[2] < low[0] and close[1] > open[1]
+    
+    // Bearish FVG: 3 candles ago low > current high
+    bearishFVG := low[2] > high[0] and close[1] < open[1]
+    
+    // Minimum gap filter
+    if fvgMinGap > 0
+        bullishFVG := bullishFVG and (low[0] - high[2]) >= fvgMinGap * syminfo.mintick
+        bearishFVG := bearishFVG and (low[2] - high[0]) >= fvgMinGap * syminfo.mintick
+
+// Draw FVG boxes with labels — ONLY when Model A is enabled
+var box[] fvgBoxes = array.new_box(0)
+var label[] fvgLabels = array.new_label(0)
+
+if modelAMode and bullishFVG and showBullishFVG
+    fvgBox = box.new(bar_index[2], high[2], bar_index + fvgExtendBars, low[0], bgcolor=c_fvgBullish, border_color=color.new(color.teal, 50))
+    array.push(fvgBoxes, fvgBox)
+
+    if array.size(fvgBoxes) > 20
+        box.delete(array.shift(fvgBoxes))
+
+    if showFVGLabels
+        fvgLabel = label.new(bar_index + math.round(fvgExtendBars / 2), (high[2] + low[0]) / 2, "FVG", color=color.new(color.teal, 100), textcolor=color.white, size=size.tiny, style=label.style_label_center)
+        array.push(fvgLabels, fvgLabel)
+        if array.size(fvgLabels) > 20
+            label.delete(array.shift(fvgLabels))
+
+    if alertOnFVG
+        alert("Bullish Fair Value Gap detected! TEAL box shows institutional buying zone. Look for long entries if price returns here.", alert.freq_once_per_bar_close)
+
+if modelAMode and bearishFVG and showBearishFVG
+    fvgBox = box.new(bar_index[2], low[2], bar_index + fvgExtendBars, high[0], bgcolor=c_fvgBearish, border_color=color.new(color.maroon, 50))
+    array.push(fvgBoxes, fvgBox)
+
+    if array.size(fvgBoxes) > 20
+        box.delete(array.shift(fvgBoxes))
+
+    if showFVGLabels
+        fvgLabel = label.new(bar_index + math.round(fvgExtendBars / 2), (low[2] + high[0]) / 2, "FVG", color=color.new(color.maroon, 100), textcolor=color.white, size=size.tiny, style=label.style_label_center)
+        array.push(fvgLabels, fvgLabel)
+        if array.size(fvgLabels) > 20
+            label.delete(array.shift(fvgLabels))
+
+    if alertOnFVG
+        alert("Bearish Fair Value Gap detected! MAROON box shows institutional selling zone. Look for short entries if price returns here.", alert.freq_once_per_bar_close)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// INVERTED FVG (iFVG) DETECTION
+// ──────────────────────────────────────────────────────────────────────────────
+
+// INVERTED FVG (iFVG) = When price fills an old FVG but leaves a NEW gap behind.
+// This is a CONTINUATION signal — institutions are defending the level.
+//
+// Bullish iFVG: Price drops into an old bearish FVG zone, then gaps UP
+//   → Bears failed to push lower. Bulls stepped in. Continue UP.
+//
+// Bearish iFVG: Price rallies into an old bullish FVG zone, then gaps DOWN
+//   → Bulls failed to push higher. Bears stepped in. Continue DOWN.
+
+// Track recent FVG zones for inversion detection
+var float lastBullFVG_Top = na
+var float lastBullFVG_Bottom = na
+var float lastBearFVG_Top = na
+var float lastBearFVG_Bottom = na
+
+if bullishFVG
+    lastBullFVG_Top := high[2]
+    lastBullFVG_Bottom := low[0]
+
+if bearishFVG
+    lastBearFVG_Top := high[0]
+    lastBearFVG_Bottom := low[2]
+
+// Detect iFVG: price entered the opposite FVG zone, then left a new gap
+bullishiFVG = false
+bearishiFVG = false
+
+if showiFVG and modelAMode
+    // Bullish iFVG: price was inside last bearish FVG zone, then bullish FVG formed
+    if not na(lastBearFVG_Top) and not na(lastBearFVG_Bottom)
+        wasInBearZone = low[1] <= lastBearFVG_Top and high[1] >= lastBearFVG_Bottom
+        bullishiFVG := wasInBearZone and bullishFVG
+    
+    // Bearish iFVG: price was inside last bullish FVG zone, then bearish FVG formed
+    if not na(lastBullFVG_Top) and not na(lastBullFVG_Bottom)
+        wasInBullZone = low[1] <= lastBullFVG_Top and high[1] >= lastBullFVG_Bottom
+        bearishiFVG := wasInBullZone and bearishFVG
+
+// Draw iFVG labels — ONLY when Model A is enabled
+var label[] iFvgLabels = array.new_label(0)
+
+if array.size(iFvgLabels) > 10
+    label.delete(array.shift(iFvgLabels))
+
+if modelAMode and bullishiFVG
+    l = label.new(bar_index, low, "iFVG\n(Bullish Inversion)", color=c_iFvgBullish, textcolor=color.white, size=size.small, style=label.style_label_up)
+    array.push(iFvgLabels, l)
+
+if modelAMode and bearishiFVG
+    l = label.new(bar_index, high, "iFVG\n(Bearish Inversion)", color=c_iFvgBearish, textcolor=color.white, size=size.small, style=label.style_label_down)
+    array.push(iFvgLabels, l)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// OTE FIBONACCI (MODEL B)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// OTE = Optimal Trade Entry
+// In a trending market, price rarely goes straight up/down.
+// It pulls back to "discount" zones before continuing.
+// The OTE zone (61.8% - 78.6% Fibonacci) is where institutions add to positions.
+//
+// Think of it as: The trend is your friend, but don't chase it.
+// Wait for price to come back to you in the OTE zone.
+
+// Find swing high and low for Fibonacci retracement
+var float fibSwingHigh = na
+var float fibSwingLow = na
+var int fibSwingHighBar = na
+var int fibSwingLowBar = na
+
+// Update swing points
+if not na(swingHigh)
+    fibSwingHigh := swingHigh
+    fibSwingHighBar := bar_index[pivotLookback]
+
+if not na(swingLow)
+    fibSwingLow := swingLow
+    fibSwingLowBar := bar_index[pivotLookback]
+
+// Calculate Fibonacci levels
+fibRange = fibSwingHigh - fibSwingLow
+fib0 = fibSwingHigh
+fib382 = fibSwingHigh - fibRange * 0.382
+fib500 = fibSwingHigh - fibRange * 0.500
+fib618 = fibSwingHigh - fibRange * 0.618
+fib786 = fibSwingHigh - fibRange * 0.786
+fib1000 = fibSwingLow
+
+// OTE Zone - The "sweet spot" for entries
+oteTop = fibSwingHigh - fibRange * fibOTEZoneLow
+oteBottom = fibSwingHigh - fibRange * fibOTEZoneHigh
+
+// Draw Fibonacci levels
+if modelBMode and showFibLevels and not na(fibSwingHigh) and not na(fibSwingLow)
+    // Draw lines from swing points
+    line.new(fibSwingHighBar, fibSwingHigh, bar_index, fibSwingHigh, color=c_fib0, width=1, style=line.style_solid)
+    line.new(fibSwingLowBar, fibSwingLow, bar_index, fibSwingLow, color=c_fib1000, width=1, style=line.style_solid)
+    
+    // Draw Fib levels
+    line.new(fibSwingHighBar, fib382, bar_index, fib382, color=c_fib382, width=1, style=line.style_dotted)
+    line.new(fibSwingHighBar, fib500, bar_index, fib500, color=c_fib500, width=1, style=line.style_dotted)
+    line.new(fibSwingHighBar, fib618, bar_index, fib618, color=c_fib618, width=1, style=line.style_dotted)
+    line.new(fibSwingHighBar, fib786, bar_index, fib786, color=c_fib786, width=1, style=line.style_dotted)
+    
+    // Labels - only draw when a new swing is established to avoid label spam
+    if showFibLabels and (not na(swingHigh) or not na(swingLow))
+        label.new(bar_index, fib382, "38.2%", color=color.new(color.yellow, 100), textcolor=c_fib382, size=size.tiny, style=label.style_label_left)
+        label.new(bar_index, fib500, "50%", color=color.new(color.orange, 100), textcolor=c_fib500, size=size.tiny, style=label.style_label_left)
+        label.new(bar_index, fib618, "61.8%", color=color.new(color.green, 100), textcolor=c_fib618, size=size.tiny, style=label.style_label_left)
+        label.new(bar_index, fib786, "78.6%", color=color.new(color.blue, 100), textcolor=c_fib786, size=size.tiny, style=label.style_label_left)
+
+// Highlight OTE Zone — ONLY when Model B is enabled
+if modelBMode and showOTEZone and not na(oteTop) and not na(oteBottom)
+    box.new(bar_index - fibLookback, oteTop, bar_index + 5, oteBottom, bgcolor=c_oteZone, border_color=color.new(color.orange, 50))
+
+// OTE Touch Detection
+inOTEZone = low <= oteTop and high >= oteBottom and not na(oteTop) and not na(oteBottom)
+wasInOTEZone = low[1] <= oteTop[1] and high[1] >= oteBottom[1]
+
+oteTouch = modelBMode and inOTEZone and not wasInOTEZone and (bullishBias or bearishBias)
+
+if oteTouch and alertOnOTE
+    alert("Price entered OTE Zone! This is the optimal area to enter in the direction of the trend.", alert.freq_once_per_bar_close)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MODEL C: HTF FVG + LTF FVG ENTRY
+// ══════════════════════════════════════════════════════════════════════════════
+
+// MODEL C is a pure FVG-confluence strategy with NO sweeps and NO bias filter.
+//
+// HOW IT WORKS:
+//   1. Detect FVGs on the HTF (e.g., 4H) — these become our directional anchors
+//   2. Wait for price to enter (wick touch is enough) that HTF FVG zone
+//   3. Detect the FIRST FVG on the LTF (e.g., 15m, 5m, 1m) that forms while
+//      price is inside the HTF FVG
+//   4. Enter in the direction of the HTF FVG
+//
+// WHY THIS WORKS:
+//   - The HTF FVG shows where institutions left an imbalance
+//   - Price is magnetically drawn back to fill it
+//   - The LTF FVG confirms that the HTF FVG is holding (institutions are
+//     defending the level on the lower timeframe)
+//   - This gives us a high-probability entry with a tight stop
+//
+// EXAMPLE (Bearish Setup):
+//   - 4H bearish FVG forms at 1.0850-1.0870
+//   - Price pulls back and wicks into that zone
+//   - First 15m bearish FVG forms while price is inside the 4H zone
+//   → SELL signal. Stop above the 4H FVG high. Target 3R+.
+
+// ── HTF FVG Detection ──
+// We fetch HTF data and detect FVGs on that timeframe
+[htfHigh_C, htfLow_C, htfClose_C, htfOpen_C] = request.security(syminfo.tickerid, modelCHTFFrame, [high, low, close, open], lookahead=barmerge.lookahead_on)
+
+// HTF Bullish FVG: high[2] < low[0] on HTF
+htfBullishFVG = false
+htfBearishFVG = false
+
+if modelCMode
+    // Bullish FVG on HTF: gap UP
+    htfBullishFVG := htfHigh_C[2] < htfLow_C[0] and htfClose_C[1] > htfOpen_C[1]
+    // Bearish FVG on HTF: gap DOWN
+    htfBearishFVG := htfLow_C[2] > htfHigh_C[0] and htfClose_C[1] < htfOpen_C[1]
+
+// Track the most recent HTF FVG levels
+var float htfFvgTop = na
+var float htfFvgBottom = na
+var bool htfFvgIsBullish = false
+var bool htfFvgIsBearish = false
+var int htfFvgBar = na
+
+if modelCMode and htfBullishFVG
+    htfFvgTop := htfHigh_C[2]
+    htfFvgBottom := htfLow_C[0]
+    htfFvgIsBullish := true
+    htfFvgIsBearish := false
+    htfFvgBar := bar_index
+
+if modelCMode and htfBearishFVG
+    htfFvgTop := htfHigh_C[0]
+    htfFvgBottom := htfLow_C[2]
+    htfFvgIsBullish := false
+    htfFvgIsBearish := true
+    htfFvgBar := bar_index
+
+// Draw HTF FVG boxes on the chart with labels
+var box[] htfFvgBoxes = array.new_box(0)
+var label[] htfFvgLabels = array.new_label(0)
+
+// Only draw a new HTF FVG box when a fresh HTF FVG is detected
+if modelCMode and showHTFFVG and (htfBullishFVG or htfBearishFVG) and not na(htfFvgTop) and not na(htfFvgBottom)
+    htfBox = box.new(htfFvgBar, htfFvgTop, bar_index + 20, htfFvgBottom,
+                     bgcolor=htfFvgIsBullish ? c_htfFvgBullish : c_htfFvgBearish,
+                     border_color=htfFvgIsBullish ? color.new(color.aqua, 30) : color.new(color.fuchsia, 30))
+    array.push(htfFvgBoxes, htfBox)
+    
+    if array.size(htfFvgBoxes) > 10
+        box.delete(array.shift(htfFvgBoxes))
+    
+    // Label the HTF FVG box
+    htfLabel = label.new(bar_index + 10, (htfFvgTop + htfFvgBottom) / 2,
+                         htfFvgIsBullish ? "HTF FVG\n(Bullish)" : "HTF FVG\n(Bearish)",
+                         color=color.new(color.gray, 100),
+                         textcolor=htfFvgIsBullish ? color.aqua : color.fuchsia,
+                         size=size.tiny, style=label.style_label_center)
+    array.push(htfFvgLabels, htfLabel)
+    if array.size(htfFvgLabels) > 10
+        label.delete(array.shift(htfFvgLabels))
+
+// ── Price Inside HTF FVG? ──
+// Wick touch is enough — candle does NOT need to close inside
+priceInHTFFVG = false
+if modelCMode and not na(htfFvgTop) and not na(htfFvgBottom)
+    priceInHTFFVG := (low <= htfFvgTop and high >= htfFvgBottom)
+
+// ── LTF FVG Detection ──
+// Detect FVGs on the current (lower) timeframe
+ltfBullishFVG = false
+ltfBearishFVG = false
+
+if modelCMode
+    // Same FVG logic as Model A but on current timeframe
+    ltfBullishFVG := high[2] < low[0] and close[1] > open[1]
+    ltfBearishFVG := low[2] > high[0] and close[1] < open[1]
+
+// Draw LTF FVG boxes (smaller, more transparent) with labels
+var box[] ltfFvgBoxes = array.new_box(0)
+var label[] ltfFvgLabels = array.new_label(0)
+
+if modelCMode and showLTFFVG and ltfBullishFVG
+    ltfBox = box.new(bar_index[2], high[2], bar_index + 10, low[0],
+                     bgcolor=c_ltfFvgBullish, border_color=color.new(color.lime, 40))
+    array.push(ltfFvgBoxes, ltfBox)
+    if array.size(ltfFvgBoxes) > 15
+        box.delete(array.shift(ltfFvgBoxes))
+    
+    ltfLabel = label.new(bar_index + 5, (high[2] + low[0]) / 2, "LTF FVG",
+                         color=color.new(color.gray, 100), textcolor=color.lime,
+                         size=size.tiny, style=label.style_label_center)
+    array.push(ltfFvgLabels, ltfLabel)
+    if array.size(ltfFvgLabels) > 15
+        label.delete(array.shift(ltfFvgLabels))
+
+if modelCMode and showLTFFVG and ltfBearishFVG
+    ltfBox = box.new(bar_index[2], low[2], bar_index + 10, high[0],
+                     bgcolor=c_ltfFvgBearish, border_color=color.new(color.purple, 40))
+    array.push(ltfFvgBoxes, ltfBox)
+    if array.size(ltfFvgBoxes) > 15
+        box.delete(array.shift(ltfFvgBoxes))
+    
+    ltfLabel = label.new(bar_index + 5, (low[2] + high[0]) / 2, "LTF FVG",
+                         color=color.new(color.gray, 100), textcolor=color.purple,
+                         size=size.tiny, style=label.style_label_center)
+    array.push(ltfFvgLabels, ltfLabel)
+    if array.size(ltfFvgLabels) > 15
+        label.delete(array.shift(ltfFvgLabels))
+
+// ── Model C Signal Logic ──
+// BUY:  Price inside HTF BULLISH FVG + LTF BULLISH FVG forms
+// SELL: Price inside HTF BEARISH FVG + LTF BEARISH FVG forms
+//
+// We use a 3-bar window for the LTF FVG to form after price enters the HTF FVG
+var bool wasPriceInHTFFVG = false
+wasPriceInHTFFVG := priceInHTFFVG[1] or priceInHTFFVG[2] or priceInHTFFVG[3]
+
+modelCBuySignal = false
+modelCSellSignal = false
+
+if modelCMode
+    // Buy: HTF bullish FVG is active + price is/was inside it + LTF bullish FVG forms
+    modelCBuySignal := htfFvgIsBullish and (priceInHTFFVG or wasPriceInHTFFVG) and (ltfBullishFVG or ltfBullishFVG[1] or ltfBullishFVG[2])
+    
+    // Sell: HTF bearish FVG is active + price is/was inside it + LTF bearish FVG forms
+    modelCSellSignal := htfFvgIsBearish and (priceInHTFFVG or wasPriceInHTFFVG) and (ltfBearishFVG or ltfBearishFVG[1] or ltfBearishFVG[2])
+
+// ── Model C Progress Labels ──
+// Show what stage the Model C setup is at
+var label[] modelCLabels = array.new_label(0)
+
+if array.size(modelCLabels) > 5
+    label.delete(array.shift(modelCLabels))
+
+if modelCMode and showModelCArrows and not (modelCBuySignal or modelCSellSignal)
+    if not na(htfFvgTop) and not na(htfFvgBottom)
+        if priceInHTFFVG
+            if htfFvgIsBullish
+                if not (ltfBullishFVG or ltfBullishFVG[1] or ltfBullishFVG[2])
+                    l = label.new(bar_index, low, "Model C\n2/3: In HTF FVG\nWait for LTF FVG", color=color.new(color.aqua, 60), textcolor=color.white, size=size.tiny, style=label.style_label_up)
+                    array.push(modelCLabels, l)
+            else if htfFvgIsBearish
+                if not (ltfBearishFVG or ltfBearishFVG[1] or ltfBearishFVG[2])
+                    l = label.new(bar_index, high, "Model C\n2/3: In HTF FVG\nWait for LTF FVG", color=color.new(color.fuchsia, 60), textcolor=color.white, size=size.tiny, style=label.style_label_down)
+                    array.push(modelCLabels, l)
+        else
+            // Price not in HTF FVG yet — show distance
+            if htfFvgIsBullish
+                l = label.new(bar_index, low, "Model C\n1/3: HTF Bull FVG\nWait for price entry", color=color.new(color.gray, 70), textcolor=color.white, size=size.tiny, style=label.style_label_up)
+                array.push(modelCLabels, l)
+            else if htfFvgIsBearish
+                l = label.new(bar_index, high, "Model C\n1/3: HTF Bear FVG\nWait for price entry", color=color.new(color.gray, 70), textcolor=color.white, size=size.tiny, style=label.style_label_down)
+                array.push(modelCLabels, l)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SIGNAL COMBINATION (MODEL A + MODEL B + MODEL C)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Model A Signal: Sweep + FVG in direction of bias
+// Allow FVG to form within 3 bars after sweep for flexibility
+modelABuySignal = false
+modelASellSignal = false
+
+if modelAMode
+    // Buy: Sellside sweep occurred recently + bullish FVG formed + bullish bias
+    recentSellsideSweep = isSellsideSweep or isSellsideSweep[1] or isSellsideSweep[2]
+    recentBullishFVG = bullishFVG or bullishFVG[1] or bullishFVG[2]
+    modelABuySignal := recentSellsideSweep and recentBullishFVG and bullishBias
+    
+    // Sell: Buyside sweep occurred recently + bearish FVG formed + bearish bias
+    recentBuysideSweep = isBuysideSweep or isBuysideSweep[1] or isBuysideSweep[2]
+    recentBearishFVG = bearishFVG or bearishFVG[1] or bearishFVG[2]
+    modelASellSignal := recentBuysideSweep and recentBearishFVG and bearishBias
+
+// Model B Signal: Price in OTE zone with trend alignment
+modelBBuySignal = oteTouch and bullishBias
+modelBSellSignal = oteTouch and bearishBias
+
+// Combined signals
+buySignal = (modelAMode and modelABuySignal) or (modelBMode and modelBBuySignal) or (modelCMode and modelCBuySignal)
+sellSignal = (modelAMode and modelASellSignal) or (modelBMode and modelBSellSignal) or (modelCMode and modelCSellSignal)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SIGNAL PROGRESS TRACKING (Visual Checklist)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// This shows you STEP BY STEP how a setup is building.
+// You don't need to guess - the indicator tells you exactly what's happening.
+
+// Step 1: Price near liquidity pool (within 1 ATR)
+atrValue = ta.atr(14)
+nearBuysidePool = not na(recentSwingHigh) and (high >= recentSwingHigh - atrValue) and (high <= recentSwingHigh + atrValue * 0.5)
+nearSellsidePool = not na(recentSwingLow) and (low <= recentSwingLow + atrValue) and (low >= recentSwingLow - atrValue * 0.5)
+
+// Setup progression labels
+var label[] setupLabels = array.new_label(0)
+
+// Clear old setup labels
+if array.size(setupLabels) > 10
+    label.delete(array.shift(setupLabels))
+
+// Show progression when price is near a pool but no full signal yet — ONLY when Model A is enabled
+if showBuySellSignals and modelAMode
+    // Bullish setup progression
+    if nearSellsidePool and not buySignal
+        if isSellsideSweep
+            if bullishFVG or bullishFVG[1] or bullishFVG[2]
+                if bullishBias
+                    // All steps complete - should have signal, but double-check
+                    l = label.new(bar_index, low, "SETUP READY\nAll conditions met!", color=color.new(color.green, 50), textcolor=color.white, size=size.small, style=label.style_label_up)
+                    array.push(setupLabels, l)
+                else
+                    l = label.new(bar_index, low, "4/5: Need Bias\n(FVG formed but no HTF bias)", color=color.new(color.yellow, 50), textcolor=color.black, size=size.tiny, style=label.style_label_up)
+                    array.push(setupLabels, l)
+            else
+                l = label.new(bar_index, low, "2/5: Sweep ✓\n(Wait for FVG box)", color=color.new(color.blue, 70), textcolor=color.white, size=size.tiny, style=label.style_label_up)
+                array.push(setupLabels, l)
+        else
+            l = label.new(bar_index, low, "1/5: Near Pool\n(Price approaching support)", color=color.new(color.gray, 70), textcolor=color.white, size=size.tiny, style=label.style_label_up)
+            array.push(setupLabels, l)
+
+    // Bearish setup progression
+    if nearBuysidePool and not sellSignal
+        if isBuysideSweep
+            if bearishFVG or bearishFVG[1] or bearishFVG[2]
+                if bearishBias
+                    l = label.new(bar_index, high, "SETUP READY\nAll conditions met!", color=color.new(color.red, 50), textcolor=color.white, size=size.small, style=label.style_label_down)
+                    array.push(setupLabels, l)
+                else
+                    l = label.new(bar_index, high, "4/5: Need Bias\n(FVG formed but no HTF bias)", color=color.new(color.yellow, 50), textcolor=color.black, size=size.tiny, style=label.style_label_down)
+                    array.push(setupLabels, l)
+            else
+                l = label.new(bar_index, high, "2/5: Sweep ✓\n(Wait for FVG box)", color=color.new(color.blue, 70), textcolor=color.white, size=size.tiny, style=label.style_label_down)
+                array.push(setupLabels, l)
+        else
+            l = label.new(bar_index, high, "1/5: Near Pool\n(Price approaching resistance)", color=color.new(color.gray, 70), textcolor=color.white, size=size.tiny, style=label.style_label_down)
+            array.push(setupLabels, l)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SIGNAL DISPLAY WITH ADJUSTABLE SIZES
+// ──────────────────────────────────────────────────────────────────────────────
+
+// We use separate plotshape calls for each size because Pine v6
+// requires const string for the size argument.
+
+// BUY signals - all sizes
+plotshape(showBuySellSignals and buySignal and signalArrowSize == "tiny", title="BUY Signal (Tiny)", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.tiny, text="BUY", textcolor=color.white, offset=0)
+plotshape(showBuySellSignals and buySignal and signalArrowSize == "small", title="BUY Signal (Small)", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.small, text="BUY", textcolor=color.white, offset=0)
+plotshape(showBuySellSignals and buySignal and signalArrowSize == "normal", title="BUY Signal (Normal)", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.normal, text="BUY", textcolor=color.white, offset=0)
+plotshape(showBuySellSignals and buySignal and signalArrowSize == "large", title="BUY Signal (Large)", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.large, text="BUY", textcolor=color.white, offset=0)
+
+// SELL signals - all sizes
+plotshape(showBuySellSignals and sellSignal and signalArrowSize == "tiny", title="SELL Signal (Tiny)", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.tiny, text="SELL", textcolor=color.white, offset=0)
+plotshape(showBuySellSignals and sellSignal and signalArrowSize == "small", title="SELL Signal (Small)", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.small, text="SELL", textcolor=color.white, offset=0)
+plotshape(showBuySellSignals and sellSignal and signalArrowSize == "normal", title="SELL Signal (Normal)", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.normal, text="SELL", textcolor=color.white, offset=0)
+plotshape(showBuySellSignals and sellSignal and signalArrowSize == "large", title="SELL Signal (Large)", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.large, text="SELL", textcolor=color.white, offset=0)
+
+// Additional signal labels for clarity - with adjustable sizes
+if showBuySellSignals and buySignal
+    signalText = modelCBuySignal ? "BUY (Model C)\nHTF FVG + LTF FVG" : modelBBuySignal ? "BUY (Model B)\nOTE Zone" : "BUY (Model A)\nSweep + FVG"
+    if signalTextSize == "tiny"
+        label.new(bar_index, low, signalText + "\n" + str.tostring(close, format.mintick), color=color.new(color.green, 0), textcolor=color.white, size=size.tiny, style=label.style_label_up)
+    else if signalTextSize == "small"
+        label.new(bar_index, low, signalText + "\n" + str.tostring(close, format.mintick), color=color.new(color.green, 0), textcolor=color.white, size=size.small, style=label.style_label_up)
+    else if signalTextSize == "normal"
+        label.new(bar_index, low, signalText + "\n" + str.tostring(close, format.mintick), color=color.new(color.green, 0), textcolor=color.white, size=size.normal, style=label.style_label_up)
+    else
+        label.new(bar_index, low, signalText + "\n" + str.tostring(close, format.mintick), color=color.new(color.green, 0), textcolor=color.white, size=size.large, style=label.style_label_up)
+    
+    if alertOnBuySignal
+        alert("BUY SIGNAL CONFIRMED!\nSetup: " + (modelCBuySignal ? "Model C - HTF FVG + LTF FVG" : modelBBuySignal ? "Model B - OTE Zone" : "Model A - Sweep + FVG + Bias") + ". Enter long with stop below the recent low.", alert.freq_once_per_bar_close)
+
+if showBuySellSignals and sellSignal
+    signalText = modelCSellSignal ? "SELL (Model C)\nHTF FVG + LTF FVG" : modelBSellSignal ? "SELL (Model B)\nOTE Zone" : "SELL (Model A)\nSweep + FVG"
+    if signalTextSize == "tiny"
+        label.new(bar_index, high, signalText + "\n" + str.tostring(close, format.mintick), color=color.new(color.red, 0), textcolor=color.white, size=size.tiny, style=label.style_label_down)
+    else if signalTextSize == "small"
+        label.new(bar_index, high, signalText + "\n" + str.tostring(close, format.mintick), color=color.new(color.red, 0), textcolor=color.white, size=size.small, style=label.style_label_down)
+    else if signalTextSize == "normal"
+        label.new(bar_index, high, signalText + "\n" + str.tostring(close, format.mintick), color=color.new(color.red, 0), textcolor=color.white, size=size.normal, style=label.style_label_down)
+    else
+        label.new(bar_index, high, signalText + "\n" + str.tostring(close, format.mintick), color=color.new(color.red, 0), textcolor=color.white, size=size.large, style=label.style_label_down)
+    
+    if alertOnSellSignal
+        alert("SELL SIGNAL CONFIRMED!\nSetup: " + (modelCSellSignal ? "Model C - HTF FVG + LTF FVG" : modelBSellSignal ? "Model B - OTE Zone" : "Model A - Sweep + FVG + Bias") + ". Enter short with stop above the recent high.", alert.freq_once_per_bar_close)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// INFO PANEL
+// ──────────────────────────────────────────────────────────────────────────────
+
+var table infoPanel = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 80), frame_color=color.gray, frame_width=1)
+
+if barstate.islast
+    table.cell(infoPanel, 0, 0, "HTF Bias:", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 1, 0, htfBullish ? "BULLISH" : htfBearish ? "BEARISH" : "NEUTRAL", 
+               text_color=htfBullish ? color.green : htfBearish ? color.red : color.gray, text_size=size.small)
+    
+    table.cell(infoPanel, 0, 1, "Trend:", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 1, 1, trendBullish ? "UP" : trendBearish ? "DOWN" : "SIDE", 
+               text_color=trendBullish ? color.green : trendBearish ? color.red : color.gray, text_size=size.small)
+    
+    table.cell(infoPanel, 0, 2, "Model A:", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 1, 2, modelAMode ? "ON" : "OFF", 
+               text_color=modelAMode ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoPanel, 0, 3, "Model B:", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 1, 3, modelBMode ? "ON" : "OFF", 
+               text_color=modelBMode ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoPanel, 0, 4, "Model C:", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 1, 4, modelCMode ? "ON" : "OFF", 
+               text_color=modelCMode ? color.green : color.red, text_size=size.small)
+    
+    table.cell(infoPanel, 0, 5, "Recent High:", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 1, 5, str.tostring(recentSwingHigh, format.mintick), text_color=color.blue, text_size=size.small)
+    
+    table.cell(infoPanel, 0, 6, "Recent Low:", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 1, 6, str.tostring(recentSwingLow, format.mintick), text_color=color.red, text_size=size.small)
+    
+    table.cell(infoPanel, 0, 7, "Signal Size:", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 1, 7, signalArrowSize, text_color=color.yellow, text_size=size.small)
+    
+    table.cell(infoPanel, 0, 8, "Next Setup:", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 1, 8, bullishBias ? "Look for BUY" : bearishBias ? "Look for SELL" : "Wait for bias", 
+               text_color=bullishBias ? color.green : bearishBias ? color.red : color.gray, text_size=size.small)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// BACKGROUND COLOR FOR BIAS
+// ──────────────────────────────────────────────────────────────────────────────
+
+// GREEN background = Bullish bias - look for BUY setups only
+// RED background = Bearish bias - look for SELL setups only
+// NO background = Neutral - wait for bias to form
+// Only show bias background when at least one model is enabled
+bgcolor((bullishBias or bearishBias) and (modelAMode or modelBMode or modelCMode) ? (bullishBias ? color.new(color.green, 95) : color.new(color.red, 95)) : na, title="Bias Background")
+
+// ──────────────────────────────────────────────────────────────────────────────
+// END OF SCRIPT
+// ══════════════════════════════════════════════════════════════════════════════
