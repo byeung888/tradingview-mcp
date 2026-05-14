@@ -441,11 +441,13 @@ if modelBMode and showFibLevels and not na(fibSwingHigh) and not na(fibSwingLow)
         label.new(bar_index, fib786, "78.6%", color=color.new(color.blue, 100), textcolor=c_fib786, size=size.tiny, style=label.style_label_left)
 
 // Highlight OTE Zone — ONLY when Model B is enabled
-if modelBMode and showOTEZone and not na(oteTop) and not na(oteBottom)
-    box.new(bar_index - fibLookback, oteTop, bar_index + 5, oteBottom, bgcolor=c_oteZone, border_color=color.new(color.orange, 50))
+// BUG FIX: Only draw OTE box when price is actually inside the zone, not every bar
+// Pine Script executes top-to-bottom per bar, so inOTEZone must be declared BEFORE this block
+inOTEZone = low <= oteTop and high >= oteBottom and not na(oteTop) and not na(oteBottom)
+if modelBMode and showOTEZone and not na(oteTop) and not na(oteBottom) and inOTEZone
+    box.new(bar_index, oteTop, bar_index + 1, oteBottom, bgcolor=c_oteZone, border_color=color.new(color.orange, 50))
 
 // OTE Touch Detection
-inOTEZone = low <= oteTop and high >= oteBottom and not na(oteTop) and not na(oteBottom)
 wasInOTEZone = low[1] <= oteTop[1] and high[1] >= oteBottom[1]
 
 oteTouch = modelBMode and inOTEZone and not wasInOTEZone and (bullishBias or bearishBias)
