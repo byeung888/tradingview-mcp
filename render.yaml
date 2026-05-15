@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: tv-webhook-server
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn tv-webhook-server:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: WHATSAPP_NUMBER
+        sync: false
+      - key: CALLMEBOT_API_KEY
+        sync: false
