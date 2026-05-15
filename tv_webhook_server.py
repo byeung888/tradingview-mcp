@@ -11,7 +11,7 @@ Environment variables required:
   CALLMEBOT_API_KEY - Your CallMeBot API key
 
 To get a CallMeBot API key:
-  1. Save +34 644 52 53 02 to your contacts as 'CallMeBot'
+  1. Save +34 623 78 64 49 to your contacts as 'CallMeBot'
   2. WhatsApp message: "I allow callmebot to send me messages"
   3. They reply with your API key
 
@@ -33,16 +33,19 @@ WHATSAPP_NUMBER = os.environ.get("WHATSAPP_NUMBER", "")
 CALLMEBOT_API_KEY = os.environ.get("CALLMEBOT_API_KEY", "")
 PORT = int(os.environ.get("PORT", "5000"))
 
-if not WHATSAPP_NUMBER or not CALLMEBOT_API_KEY:
-    print("ERROR: Set WHATSAPP_NUMBER and CALLMEBOT_API_KEY environment variables")
-    sys.exit(1)
-
 # ══════════════════════════════════════════════════════════════════════════════
 # SERVER
 # ══════════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
 alert_log = []
+
+
+def check_config():
+    """Verify environment variables are set. Called on first request."""
+    if not WHATSAPP_NUMBER or not CALLMEBOT_API_KEY:
+        return False, "WHATSAPP_NUMBER and CALLMEBOT_API_KEY must be set"
+    return True, None
 
 
 def send_whatsapp(message: str) -> dict:
@@ -94,6 +97,10 @@ def format_alert(data: dict) -> str:
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """Receive TradingView webhook alerts."""
+    ok, error = check_config()
+    if not ok:
+        return jsonify({"ok": False, "error": error}), 500
+
     try:
         data = request.get_json(force=True, silent=True) or {}
     except Exception:
@@ -118,6 +125,9 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
+    ok, error = check_config()
+    if not ok:
+        return jsonify({"status": "error", "message": error}), 503
     return jsonify({"status": "ok", "alerts_received": len(alert_log)}), 200
 
 
@@ -127,4 +137,8 @@ def logs():
 
 
 if __name__ == "__main__":
+    ok, error = check_config()
+    if not ok:
+        print(f"ERROR: {error}")
+        sys.exit(1)
     app.run(host="0.0.0.0", port=PORT)
